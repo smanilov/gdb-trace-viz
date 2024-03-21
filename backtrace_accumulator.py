@@ -18,23 +18,30 @@ class BacktraceAccumulator:
         self.roots = set()
         self.hide_until_func = None
 
-    def subgraph_to_dot(self, node, dot_code, visited, show=False):
+    def subgraph_to_dot(self, node, dot_code, visited, show=False, shown=None):
         """
         DFS traversal of the graph starting from node.
 
         If hide_until_func is not None, only start adding to dot_code once it is
         encountered on the traversal.
         """
+        if shown is None:
+            shown = set()
+
         visited.add(node)
 
         if not self.hide_until_func or node == self.hide_until_func:
             show = True
 
         for neighbor in self.graph[node]:
+            # note: if neighbor in shown then neighbor in visited
+            first_show = show and not neighbor in shown
             if show:
                 dot_code.append(f'    "{node}" -> "{neighbor}"\n')
-            if neighbor not in visited:
-                self.subgraph_to_dot(neighbor, dot_code, visited, show)
+            if first_show:
+                shown.add(neighbor)
+            if neighbor not in visited or first_show:
+                self.subgraph_to_dot(neighbor, dot_code, visited, show, shown)
 
     def update_graph(self, frames):
         """
