@@ -3,16 +3,30 @@ import subprocess
 from parse_backtrace import parse_backtrace
 
 
-class BacktraceProcessor:
+class BacktraceAccumulator:
+    """
+    Builds a graph by accumulating GDB backtraces. Every time process is called,
+    the graph is updated and the .dot (GraphViz) representation is returned.
+
+    Attributes:
+        graph (dict): Maps functions to an ordered set (a list) of functions they call.
+        roots (set): A set containing the root nodes of the backtrace graph.
+        hide_until_func (str): If not None, nodes on the path from a root to
+                                this function will not be output.
+    """
+
     def __init__(self):
         self.graph = {}
         self.roots = set()
         self.hide_until_func = None
 
-    def subgraph_to_dot(self, node, dot_code, visited=None, show=False):
-        if visited is None:
-            visited = set()
+    def subgraph_to_dot(self, node, dot_code, visited, show=False):
+        """
+        DFS traversal of the graph starting from node.
 
+        If hide_until_func is not None, only start adding to dot_code once it is
+        encountered on the traversal.
+        """
         visited.add(node)
 
         if not self.hide_until_func or node == self.hide_until_func:
@@ -24,63 +38,77 @@ class BacktraceProcessor:
             if neighbor not in visited:
                 self.subgraph_to_dot(neighbor, dot_code, visited, show)
 
-    def generate_dot_tree(self, frames):
+    def update_graph(self, frames):
+        """
+        Add frames to internal graph.
+
+        Assumes the frames are in reverse calling order, i.e. main is last, e.g.
+
+        If a node already contains a neighbor, it is not added again. This
+        preserves the order of adding backtraces, but not completely...
+        """
+        if len(frames) == 0:
+            return
+
+        self.roots.add(frames[-1])
+
+        if frames[0] not in self.graph:
+            self.graph[frames[0]] = []
+
+        for i in range(len(frames) - 1):
+            if frames[i + 1] not in self.graph:
+                self.graph[frames[i + 1]] = []
+            if frames[i] not in self.graph[frames[i + 1]]:
+                self.graph[frames[i + 1]].append(frames[i])
+
+    def generate_dot_code(self, frames):
+        self.update_graph(frames)
+
         dot_code = ["digraph Backtrace {\n"]
         dot_code.append("    node [shape=box]\n")
 
-        if len(frames) > 0:
-            if frames[0] not in self.graph:
-                self.graph[frames[0]] = []
-
-            for i in range(len(frames) - 1):
-                if frames[i + 1] not in self.graph:
-                    self.graph[frames[i + 1]] = []
-                if frames[i] not in self.graph[frames[i + 1]]:
-                    self.graph[frames[i + 1]].append(frames[i])
-
-            self.roots.add(frames[-1])
-
+        visited = set()
         for root in self.roots:
-            self.subgraph_to_dot(root, dot_code)
+            self.subgraph_to_dot(root, dot_code, visited)
 
         dot_code.append("}")
         return "".join(dot_code)
 
-    def convert_backtrace_to_dot(self, backtrace):
-        frames = parse_backtrace(backtrace)
-        dot_tree = self.generate_dot_tree(frames)
-        return dot_tree
-
-    def save_dot_to_png(self, dot_code, output_file):
-        with open(output_file + ".dot", "w") as dot_file:
-            dot_file.write(dot_code)
-        subprocess.run(
-            ["dot", "-Tpng", output_file + ".dot", "-o", output_file + ".png"]
-        )
-        print(f"Backtrace saved as DOT: {output_file}.dot")
-        print(f"Backtrace converted to PNG: {output_file}.png")
-
     def process(self, backtrace):
-        dot_tree = self.convert_backtrace_to_dot(backtrace)
-        output_file = "backtrace"
-        self.save_dot_to_png(dot_tree, output_file)
+        frames = parse_backtrace(backtrace)
+        dot_code = self.generate_dot_code(frames)
+        return dot_code
+
+
+def save_dot_to_png(dot_code):
+    output_file = "backtrace"
+    with open(output_file + ".dot", "w") as dot_file:
+        dot_file.write(dot_code)
+    subprocess.run(["dot", "-Tpng", output_file + ".dot", "-o", output_file + ".png"])
+    print(f"Backtrace saved as DOT: {output_file}.dot")
+    print(f"Backtrace converted to PNG: {output_file}.png")
+
+
+def process_and_output_png(backtrace, accumulator):
+    dot_code = accumulator.process(backtrace)
+    save_dot_to_png(dot_code)
 
 
 if __name__ == "__main__":
     backtrace = ""
-    processor = BacktraceProcessor()
+    accumulator = BacktraceAccumulator()
 
     for line in sys.stdin:
         if line.strip() == "UNHIDE":
-            processor.hide_until_func = None
-            processor.process(backtrace)
+            accumulator.hide_until_func = None
+            process_and_output_png(backtrace, accumulator)
         if line.startswith("HIDE UNTIL"):
-            processor.hide_until_func = line.split(" ", 2)[2].strip()
-            processor.process(backtrace)
+            accumulator.hide_until_func = line.split(" ", 2)[2].strip()
+            process_and_output_png(backtrace, accumulator)
         elif line.strip() == "BREAK" or line == "":
-            processor.process(backtrace)
+            process_and_output_png(backtrace, accumulator)
             backtrace = ""
         else:
             backtrace += line
 
-    processor.process(backtrace)
+    accumulator.process(backtrace)
